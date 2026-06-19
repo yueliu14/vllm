@@ -2132,13 +2132,10 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             )
 
             if flydsl_emulation_moe.available():
-                from aiter.ops.shuffle import shuffle_weight
-
                 for nm in ("w13_weight", "w2_weight"):
                     w = getattr(layer, nm)
-                    ws = shuffle_weight(w.data, layout=(16, 16)).contiguous()
+                    ws = flydsl_emulation_moe.shuffle_weight_to_fly_layout(w.data)
                     replace_parameter(layer, nm, ws)
-                    getattr(layer, nm)._fly_shuffled = True
                 logger.info_once(
                     "FlyDSL MoE: shuffled MXFP8->BF16 weights in-place at load."
                 )

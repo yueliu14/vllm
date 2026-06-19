@@ -80,27 +80,36 @@ def available() -> bool:
     is validated there; other archs should validate before being added."""
     if not enabled():
         return False
-    try:
-        gcn = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
-    except Exception:
-        gcn = ""
-    if gcn != "gfx942":  # validated on gfx942 only
+    from vllm.platforms.rocm import on_gfx942
+
+    if not on_gfx942():  # validated on gfx942 only
         return False
     return _load_fly() is not None
+
+
+# FlyDSL weight layout. Shared between the load-time in-place shuffle (modelopt)
+# and the per-call fallback below, so the layout lives in exactly one place.
+_FLY_SHUFFLE_LAYOUT = (16, 16)
+
+
+def shuffle_weight_to_fly_layout(w: torch.Tensor) -> torch.Tensor:
+    """Shuffle ``w`` into FlyDSL layout and tag it ``_fly_shuffled``."""
+    ws = _load_fly()["shuffle_weight"](w, layout=_FLY_SHUFFLE_LAYOUT).contiguous()
+    ws._fly_shuffled = True
+    return ws
 
 
 def shuffle_weight_inplace_ready(w: torch.Tensor):
     """Return a flat FlyDSL-layout view of weight ``w``. If the weight was already
     shuffled in-place at load (tagged ``_fly_shuffled``), this is a free view;
     otherwise it shuffles once and caches the result (bounded to one layer)."""
-    fly = _load_fly()
     key = w.data_ptr()
     hit = _WSHUF.get(key)
     if hit is None:
         if getattr(w, "_fly_shuffled", False):
             hit = w.view(-1)
         else:
-            hit = fly["shuffle_weight"](w, layout=(16, 16)).contiguous().view(-1)
+            hit = shuffle_weight_to_fly_layout(w).view(-1)
         _WSHUF[key] = hit
     return hit
 
