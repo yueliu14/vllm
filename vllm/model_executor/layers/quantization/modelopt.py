@@ -2121,6 +2121,34 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w13_weight", w13_bf16)
         replace_parameter(layer, "w2_weight", w2_bf16)
 
+        # When the optional FlyDSL BF16 MoE is enabled, shuffle the weights into
+        # FlyDSL layout once here (in-place), so the experts' apply() needs no
+        # per-call shuffle and we hold no extra shuffled copy (which would double
+        # MoE weight HBM). Tagged so the driver knows they are ready. Best-effort:
+        # on any failure the driver shuffles per-call instead.
+        try:
+            from vllm.model_executor.layers.fused_moe.experts import (
+                flydsl_emulation_moe,
+            )
+
+            if flydsl_emulation_moe.available():
+                from aiter.ops.shuffle import shuffle_weight
+
+                for nm in ("w13_weight", "w2_weight"):
+                    w = getattr(layer, nm)
+                    ws = shuffle_weight(w.data, layout=(16, 16)).contiguous()
+                    replace_parameter(layer, nm, ws)
+                    getattr(layer, nm)._fly_shuffled = True
+                logger.info_once(
+                    "FlyDSL MoE: shuffled MXFP8->BF16 weights in-place at load."
+                )
+        except Exception as e:
+            logger.warning_once(
+                "FlyDSL MoE in-place weight shuffle skipped (%s); driver will "
+                "shuffle per-call.",
+                e,
+            )
+
         logger.info_once(
             "MXFP8->BF16 load-time dequant complete (%d experts/layer); MoE "
             "now runs in BF16 with no per-step dequant.",

@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.experts import flydsl_emulation_moe
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
@@ -156,6 +157,36 @@ class Mxfp8EmulationTritonExperts(Mxfp8TritonExpertsBase):
             w2_bf16 = dequant_mxfp8_to_bf16(w2, self.w2_scale_val).to(
                 hidden_states.dtype
             )
+
+        # Optional FlyDSL BF16 MoE (opt-in via VLLM_MINIMAX_M3_FLYDSL_MOE=1,
+        # gfx942 only). Regime guard: bf16 weights, no EP, supported topk, no
+        # router-weight-on-input. Any failure falls back to the Triton path.
+        if (
+            flydsl_emulation_moe.available()
+            and expert_map is None
+            and not apply_router_weight_on_input
+            and topk_ids.shape[1] in (4,)
+            and w1_bf16.element_size() >= 2
+        ):
+            try:
+                flydsl_emulation_moe.apply(
+                    self,
+                    output=output,
+                    hidden_states=hidden_states,
+                    w1=w1_bf16,
+                    w2=w2_bf16,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    activation=activation,
+                    global_num_experts=global_num_experts,
+                )
+                return
+            except Exception as e:
+                logger.warning_once(
+                    "FlyDSL MoE failed (M=%d), falling back to Triton: %s",
+                    hidden_states.shape[0],
+                    e,
+                )
 
         super().apply(
             output=output,
